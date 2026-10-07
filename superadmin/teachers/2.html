@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="id" data-bs-theme="light" data-lte-color-mode="off">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Rina Wulandari · Cendikia</title>
+    <link rel="preload" as="style" href="../../_assets/build/assets/app-BTgYN4KC.css" /><link rel="modulepreload" as="script" href="../../_assets/build/assets/app-DzuaMEJt.js" /><link rel="stylesheet" href="../../_assets/build/assets/app-BTgYN4KC.css" /><script type="module" src="../../_assets/build/assets/app-DzuaMEJt.js"></script><script id="browser-logger-active">
+(function() {
+    const ENDPOINT = 'http://127.0.0.1:8765/_boost/browser-logs';
+    const logQueue = [];
+    let flushTimeout = null;
+    const captureTypes = ["error","warning","info","log","debug","table"];
+
+    console.log('🔍 Browser logger active (MCP server detected). Posting to: ' + ENDPOINT);
+
+    // Store original console methods
+    const originalConsole = {
+        log: console.log,
+        debug: console.debug,
+        info: console.info,
+        error: console.error,
+        warn: console.warn,
+        table: console.table
+    };
+
+    // Walk own enumerable keys so JSON.stringify cannot auto-invoke a proxy fake toJSON (e.g. Livewire's `$wire`) and fire a real request.
+    function toSafeValue(value, seen) {
+        if (value === null || typeof value !== 'object') {
+            return value;
+        }
+        if (value instanceof Error) {
+            return { name: value.name, message: value.message, stack: value.stack };
+        }
+        // Date has no own enumerable keys, so the walk below would collapse it to {}.
+        if (value instanceof Date) {
+            return value.toISOString();
+        }
+        if (seen.has(value)) {
+            return '[Circular]';
+        }
+        seen.add(value);
+        if (Array.isArray(value)) {
+            return value.map((item) => toSafeValue(item, seen));
+        }
+        const plain = {};
+        for (const key of Object.keys(value)) {
+            if (key === 'toJSON') continue;
+            try {
+                plain[key] = toSafeValue(value[key], seen);
+            } catch (e) {
+                plain[key] = '[Unreadable]';
+            }
+        }
+        return plain;
+    }
+
+    // Helper to safely stringify values
+    function safeStringify(obj) {
+        return JSON.stringify(toSafeValue(obj, new WeakSet()));
+    }
+
+    // Normalize log type for consistency (e.g., 'warn' to 'warning')
+    function normalizeType(type) {
+        return type === 'warn' ? 'warning' : type;
+    }
+
+    // Determine if a log type should be captured based on configured levels
+    function shouldCapture(type) {
+        return captureTypes.includes(normalizeType(type));
+    }
+
+    // Batch and send logs
+    function flushLogs() {
+        if (logQueue.length === 0) return;
+
+        const batch = logQueue.splice(0, logQueue.length);
+
+        fetch(ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: JSON.stringify({ logs: batch })
+        }).catch(err => {
+            // Silently fail to avoid infinite loops
+            originalConsole.error('Failed to send logs:', err);
+        });
+    }
+
+    // Debounced flush (100ms)
+    function scheduleFlush() {
+        if (flushTimeout) clearTimeout(flushTimeout);
+        flushTimeout = setTimeout(flushLogs, 100);
+    }
+
+    // Intercept console methods
+    ['log', 'debug', 'info', 'error', 'warn', 'table'].forEach(method => {
+        console[method] = function(...args) {
+            // Call original method
+            originalConsole[method].apply(console, args);
+
+            // Capture log data
+            try {
+                if (!shouldCapture(method)) {
+                    return;
+                }
+
+                logQueue.push({
+                    type: method,
+                    timestamp: new Date().toISOString(),
+                    data: args.map(arg => {
+                        try {
+                            return typeof arg === 'object' ? JSON.parse(safeStringify(arg)) : arg;
+                        } catch (e) {
+                            return String(arg);
+                        }
+                    }),
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            } catch (e) {
+                // Fail silently
+            }
+        };
+    });
+
+    // Global error handlers for uncaught errors
+    const originalOnError = window.onerror;
+    window.onerror = function boostErrorHandler(errorMsg, url, lineNumber, colNumber, error) {
+        try {
+            if (shouldCapture('error')) {
+                logQueue.push({
+                    type: 'uncaught_error',
+                    timestamp: new Date().toISOString(),
+                    data: [{
+                        message: errorMsg,
+                        filename: url,
+                        lineno: lineNumber,
+                        colno: colNumber,
+                        error: error ? {
+                            name: error.name,
+                            message: error.message,
+                            stack: error.stack
+                        } : null
+                    }],
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            }
+
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Call original handler if it exists
+        if (originalOnError && typeof originalOnError === 'function') {
+            return originalOnError(errorMsg, url, lineNumber, colNumber, error);
+        }
+
+        // Let the error continue to propagate
+        return false;
+    }
+    window.addEventListener('error', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'window_error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: event.message,
+                    filename: event.filename,
+                    lineno: event.lineno,
+                    colno: event.colno,
+                    error: event.error ? {
+                        name: event.error.name,
+                        message: event.error.message,
+                        stack: event.error.stack
+                    } : null
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the error continue to propagate
+        return false;
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: 'Unhandled Promise Rejection',
+                    reason: toSafeValue(event.reason, new WeakSet())
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the rejection continue to propagate
+        return false;
+    });
+
+    // Flush on page unload
+    window.addEventListener('beforeunload', () => {
+        if (logQueue.length > 0) {
+            navigator.sendBeacon(ENDPOINT, JSON.stringify({ logs: logQueue }));
+        }
+    });
+})();
+</script>
+</head>
+<body class="layout-fixed sidebar-expand-lg bg-body-tertiary">
+<div class="app-wrapper">
+    <nav class="app-header navbar navbar-expand bg-body">
+        <div class="container-fluid">
+            <ul class="navbar-nav align-items-center">
+                <li class="nav-item">
+                    <a class="nav-link" data-lte-toggle="sidebar" href="#" role="button" aria-label="Buka/tutup sidebar">
+                        <i class="bi bi-list"></i>
+                    </a>
+                </li>
+                                    <li class="nav-item d-none d-md-block ms-2">
+                        <a href="../students.html" class="app-search text-decoration-none">
+                            <i class="bi bi-search" aria-hidden="true"></i>
+                            <span>Cari siswa, guru, atau nomor tagihan…</span>
+                        </a>
+                    </li>
+                            </ul>
+            <ul class="navbar-nav ms-auto align-items-center">
+                <li class="nav-item"><a href="../notifications.html" class="nav-link position-relative" aria-label="Notifications, 0 unread">
+    <i class="bi bi-bell"></i>
+    <span class="badge rounded-pill text-bg-danger position-absolute top-0 start-100 translate-middle d-none"
+          data-notification-count>0</span>
+</a>
+</li>
+                <li class="nav-item mx-2 d-none d-sm-block" aria-hidden="true"><span class="app-divider"></span></li>
+                <li class="nav-item dropdown">
+                    <a class="nav-link app-user dropdown-toggle" href="#" data-bs-toggle="dropdown" aria-expanded="false">
+                        <span class="app-avatar" aria-hidden="true">SD</span>
+                        <span class="d-none d-sm-block">
+                            <span class="app-user__name d-block">Superadmin Demo</span>
+                            <span class="app-user__role d-block">Superadmin</span>
+                        </span>
+                    </a>
+                    <div class="dropdown-menu dropdown-menu-end">
+                        <span class="dropdown-item-text text-body-secondary small">Superadmin</span>
+                        <form method="POST" action="#" data-mock-target="../../index.html">
+                                                        <button type="submit" class="dropdown-item">Keluar</button>
+                        </form>
+                    </div>
+                </li>
+            </ul>
+        </div>
+    </nav>
+
+    <aside class="app-sidebar">
+        <div class="sidebar-brand">
+            <a href="../dashboard.html" class="brand-link">
+                <img src="../../_assets/cendikia-logos/svg/horizontal/cendikia-horizontal-color.svg" class="brand-image" alt="Cendikia">
+            </a>
+        </div>
+        <div class="sidebar-wrapper">
+                            <div class="app-scope">
+                    <span class="app-scope__icon" aria-hidden="true"><i class="bi bi-geo-alt"></i></span>
+                    <div class="flex-grow-1">
+                        <div class="app-scope__label">Cakupan</div>
+                        <div class="app-scope__value">Semua wilayah</div>
+                    </div>
+                                    </div>
+                        <nav class="mt-2" aria-label="Navigasi utama">
+                <ul class="nav sidebar-menu flex-column" role="menu">
+                        <li class="nav-item">
+                <a href="../dashboard.html" class="nav-link ">
+                    <i class="nav-icon bi bi-speedometer2" aria-hidden="true"></i>
+                    <p>Dasbor</p>
+                                    </a>
+            </li>
+                                <li class="nav-header">Manajemen kursus</li>
+                                <li class="nav-item">
+                <a href="../course-requests.html" class="nav-link ">
+                    <i class="nav-icon bi bi-journal-text" aria-hidden="true"></i>
+                    <p>Permintaan kursus</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../assignments.html" class="nav-link ">
+                    <i class="nav-icon bi bi-person-check" aria-hidden="true"></i>
+                    <p>Penugasan guru</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../schedules.html" class="nav-link ">
+                    <i class="nav-icon bi bi-calendar-week" aria-hidden="true"></i>
+                    <p>Jadwal rutin</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../sessions.html" class="nav-link ">
+                    <i class="nav-icon bi bi-calendar-check" aria-hidden="true"></i>
+                    <p>Sesi pelajaran</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../calendar.html" class="nav-link ">
+                    <i class="nav-icon bi bi-calendar3" aria-hidden="true"></i>
+                    <p>Kalender</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../attendance.html" class="nav-link ">
+                    <i class="nav-icon bi bi-clipboard-check" aria-hidden="true"></i>
+                    <p>Laporan kehadiran</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../monitoring/missing-checkins.html" class="nav-link ">
+                    <i class="nav-icon bi bi-exclamation-triangle" aria-hidden="true"></i>
+                    <p>Check-in terlewat</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../reschedules.html" class="nav-link ">
+                    <i class="nav-icon bi bi-arrow-left-right" aria-hidden="true"></i>
+                    <p>Jadwal ulang</p>
+                                    </a>
+            </li>
+                                <li class="nav-header">Keuangan</li>
+                                <li class="nav-item">
+                <a href="../pricings.html" class="nav-link ">
+                    <i class="nav-icon bi bi-tags" aria-hidden="true"></i>
+                    <p>Harga</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../payroll.html" class="nav-link ">
+                    <i class="nav-icon bi bi-cash-stack" aria-hidden="true"></i>
+                    <p>Penggajian guru</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../invoices.html" class="nav-link ">
+                    <i class="nav-icon bi bi-receipt" aria-hidden="true"></i>
+                    <p>Tagihan</p>
+                                    </a>
+            </li>
+                                <li class="nav-header">Laporan</li>
+                                <li class="nav-item">
+                <a href="../reports.html" class="nav-link ">
+                    <i class="nav-icon bi bi-bar-chart" aria-hidden="true"></i>
+                    <p>Laporan</p>
+                                    </a>
+            </li>
+                                <li class="nav-header">Komunikasi</li>
+                                <li class="nav-item">
+                <a href="../announcements.html" class="nav-link ">
+                    <i class="nav-icon bi bi-megaphone" aria-hidden="true"></i>
+                    <p>Pengumuman</p>
+                                    </a>
+            </li>
+                                <li class="nav-header">Data master</li>
+                                <li class="nav-item">
+                <a href="../parents.html" class="nav-link ">
+                    <i class="nav-icon bi bi-people" aria-hidden="true"></i>
+                    <p>Orang tua</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../students.html" class="nav-link ">
+                    <i class="nav-icon bi bi-person-badge" aria-hidden="true"></i>
+                    <p>Siswa</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../teachers.html" class="nav-link ">
+                    <i class="nav-icon bi bi-person-workspace" aria-hidden="true"></i>
+                    <p>Guru</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../locations.html" class="nav-link ">
+                    <i class="nav-icon bi bi-pin-map" aria-hidden="true"></i>
+                    <p>Lokasi</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../subjects.html" class="nav-link ">
+                    <i class="nav-icon bi bi-book" aria-hidden="true"></i>
+                    <p>Mata pelajaran</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../education-levels.html" class="nav-link ">
+                    <i class="nav-icon bi bi-mortarboard" aria-hidden="true"></i>
+                    <p>Jenjang pendidikan</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../regionals.html" class="nav-link ">
+                    <i class="nav-icon bi bi-geo-alt" aria-hidden="true"></i>
+                    <p>Wilayah</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="../cities.html" class="nav-link ">
+                    <i class="nav-icon bi bi-buildings" aria-hidden="true"></i>
+                    <p>Kota</p>
+                                    </a>
+            </li>
+            </ul>
+            </nav>
+        </div>
+    </aside>
+
+    <main class="app-main">
+                <div class="app-content-header">
+            <div class="container-fluid">
+                <div class="page-header">
+    <div class="page-header__main">
+        <ol class="breadcrumb mb-0">
+            <li class="breadcrumb-item"><a href="../dashboard.html">Dasbor</a></li>
+                                    <li class="breadcrumb-item">Data master</li>
+                                                <li class="breadcrumb-item"><a href="../teachers.html">Guru</a></li>
+                                                <li class="breadcrumb-item active" aria-current="page">Detail guru</li>
+                        </ol>
+        <h1 class="page-header__title">Rina Wulandari</h1>
+            </div>
+    </div>
+            </div>
+        </div>
+        <div class="app-content">
+            <div class="container-fluid">
+                                                                <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <span><span class="badge text-bg-success">Aktif</span>
+ <span class="badge text-bg-success">Selesai</span>
+</span>
+                            <span>
+                    <a href="2/availability.html" class="btn btn-sm btn-outline-primary">Ketersediaan</a>
+                    <a href="2/edit.html" class="btn btn-sm btn-primary">Ubah</a>
+                </span>
+                    </div>
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Kode</dt><dd class="col-sm-9">TCH-002</dd>
+                <dt class="col-sm-3">Email (untuk masuk)</dt><dd class="col-sm-9">rina.wulandari@demo.cendikia.test</dd>
+                <dt class="col-sm-3">Telepon</dt><dd class="col-sm-9">081300000002</dd>
+                <dt class="col-sm-3">Wilayah</dt><dd class="col-sm-9">Malang</dd>
+                <dt class="col-sm-3">Kota asal</dt><dd class="col-sm-9">Malang</dd>
+                <dt class="col-sm-3">Kampus</dt><dd class="col-sm-9">Universitas Contoh</dd>
+                <dt class="col-sm-3">Mode</dt>
+                <dd class="col-sm-9">
+                    <span class="badge text-bg-info">Online</span>                    <span class="badge text-bg-primary">Tatap muka</span>                </dd>
+                <dt class="col-sm-3">Mata pelajaran</dt>
+                <dd class="col-sm-9"><span class="badge text-bg-light">English</span> </dd>
+                <dt class="col-sm-3">Rekening bank</dt><dd class="col-sm-9">••••••0000</dd>
+            </dl>
+        </div>
+    </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="app-footer">
+        <strong>Cendikia</strong>
+    </footer>
+</div>
+<style>.mock-ribbon{position:fixed;left:12px;bottom:12px;z-index:99999;background:#111827;color:#fff;font:600 12px system-ui;padding:7px 12px;border-radius:999px;opacity:.85;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.3)}.mock-ribbon:hover{opacity:1;color:#fff}</style><a class="mock-ribbon" href="../../index.html">Design preview &middot; switch role</a><script>
+document.addEventListener('submit',function(e){var f=e.target;if(f.tagName!=='FORM')return;e.preventDefault();e.stopImmediatePropagation();var t=f.getAttribute('data-mock-target');if(t)location.href=t;},true);
+</script></body>
+</html>

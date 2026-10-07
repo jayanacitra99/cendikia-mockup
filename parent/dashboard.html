@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="id" data-bs-theme="light" data-lte-color-mode="off">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Dasbor orang tua · Cendikia</title>
+    <link rel="preload" as="style" href="../_assets/build/assets/app-BTgYN4KC.css" /><link rel="modulepreload" as="script" href="../_assets/build/assets/app-DzuaMEJt.js" /><link rel="stylesheet" href="../_assets/build/assets/app-BTgYN4KC.css" /><script type="module" src="../_assets/build/assets/app-DzuaMEJt.js"></script><script id="browser-logger-active">
+(function() {
+    const ENDPOINT = 'http://127.0.0.1:8765/_boost/browser-logs';
+    const logQueue = [];
+    let flushTimeout = null;
+    const captureTypes = ["error","warning","info","log","debug","table"];
+
+    console.log('🔍 Browser logger active (MCP server detected). Posting to: ' + ENDPOINT);
+
+    // Store original console methods
+    const originalConsole = {
+        log: console.log,
+        debug: console.debug,
+        info: console.info,
+        error: console.error,
+        warn: console.warn,
+        table: console.table
+    };
+
+    // Walk own enumerable keys so JSON.stringify cannot auto-invoke a proxy fake toJSON (e.g. Livewire's `$wire`) and fire a real request.
+    function toSafeValue(value, seen) {
+        if (value === null || typeof value !== 'object') {
+            return value;
+        }
+        if (value instanceof Error) {
+            return { name: value.name, message: value.message, stack: value.stack };
+        }
+        // Date has no own enumerable keys, so the walk below would collapse it to {}.
+        if (value instanceof Date) {
+            return value.toISOString();
+        }
+        if (seen.has(value)) {
+            return '[Circular]';
+        }
+        seen.add(value);
+        if (Array.isArray(value)) {
+            return value.map((item) => toSafeValue(item, seen));
+        }
+        const plain = {};
+        for (const key of Object.keys(value)) {
+            if (key === 'toJSON') continue;
+            try {
+                plain[key] = toSafeValue(value[key], seen);
+            } catch (e) {
+                plain[key] = '[Unreadable]';
+            }
+        }
+        return plain;
+    }
+
+    // Helper to safely stringify values
+    function safeStringify(obj) {
+        return JSON.stringify(toSafeValue(obj, new WeakSet()));
+    }
+
+    // Normalize log type for consistency (e.g., 'warn' to 'warning')
+    function normalizeType(type) {
+        return type === 'warn' ? 'warning' : type;
+    }
+
+    // Determine if a log type should be captured based on configured levels
+    function shouldCapture(type) {
+        return captureTypes.includes(normalizeType(type));
+    }
+
+    // Batch and send logs
+    function flushLogs() {
+        if (logQueue.length === 0) return;
+
+        const batch = logQueue.splice(0, logQueue.length);
+
+        fetch(ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: JSON.stringify({ logs: batch })
+        }).catch(err => {
+            // Silently fail to avoid infinite loops
+            originalConsole.error('Failed to send logs:', err);
+        });
+    }
+
+    // Debounced flush (100ms)
+    function scheduleFlush() {
+        if (flushTimeout) clearTimeout(flushTimeout);
+        flushTimeout = setTimeout(flushLogs, 100);
+    }
+
+    // Intercept console methods
+    ['log', 'debug', 'info', 'error', 'warn', 'table'].forEach(method => {
+        console[method] = function(...args) {
+            // Call original method
+            originalConsole[method].apply(console, args);
+
+            // Capture log data
+            try {
+                if (!shouldCapture(method)) {
+                    return;
+                }
+
+                logQueue.push({
+                    type: method,
+                    timestamp: new Date().toISOString(),
+                    data: args.map(arg => {
+                        try {
+                            return typeof arg === 'object' ? JSON.parse(safeStringify(arg)) : arg;
+                        } catch (e) {
+                            return String(arg);
+                        }
+                    }),
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            } catch (e) {
+                // Fail silently
+            }
+        };
+    });
+
+    // Global error handlers for uncaught errors
+    const originalOnError = window.onerror;
+    window.onerror = function boostErrorHandler(errorMsg, url, lineNumber, colNumber, error) {
+        try {
+            if (shouldCapture('error')) {
+                logQueue.push({
+                    type: 'uncaught_error',
+                    timestamp: new Date().toISOString(),
+                    data: [{
+                        message: errorMsg,
+                        filename: url,
+                        lineno: lineNumber,
+                        colno: colNumber,
+                        error: error ? {
+                            name: error.name,
+                            message: error.message,
+                            stack: error.stack
+                        } : null
+                    }],
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            }
+
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Call original handler if it exists
+        if (originalOnError && typeof originalOnError === 'function') {
+            return originalOnError(errorMsg, url, lineNumber, colNumber, error);
+        }
+
+        // Let the error continue to propagate
+        return false;
+    }
+    window.addEventListener('error', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'window_error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: event.message,
+                    filename: event.filename,
+                    lineno: event.lineno,
+                    colno: event.colno,
+                    error: event.error ? {
+                        name: event.error.name,
+                        message: event.error.message,
+                        stack: event.error.stack
+                    } : null
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the error continue to propagate
+        return false;
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: 'Unhandled Promise Rejection',
+                    reason: toSafeValue(event.reason, new WeakSet())
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the rejection continue to propagate
+        return false;
+    });
+
+    // Flush on page unload
+    window.addEventListener('beforeunload', () => {
+        if (logQueue.length > 0) {
+            navigator.sendBeacon(ENDPOINT, JSON.stringify({ logs: logQueue }));
+        }
+    });
+})();
+</script>
+</head>
+<body class="layout-fixed sidebar-expand-lg bg-body-tertiary">
+<div class="app-wrapper">
+    <nav class="app-header navbar navbar-expand bg-body">
+        <div class="container-fluid">
+            <ul class="navbar-nav align-items-center">
+                <li class="nav-item">
+                    <a class="nav-link" data-lte-toggle="sidebar" href="#" role="button" aria-label="Buka/tutup sidebar">
+                        <i class="bi bi-list"></i>
+                    </a>
+                </li>
+                            </ul>
+            <ul class="navbar-nav ms-auto align-items-center">
+                <li class="nav-item"><a href="notifications.html" class="nav-link position-relative" aria-label="Notifications, 3 unread">
+    <i class="bi bi-bell"></i>
+    <span class="badge rounded-pill text-bg-danger position-absolute top-0 start-100 translate-middle "
+          data-notification-count>3</span>
+</a>
+</li>
+                <li class="nav-item mx-2 d-none d-sm-block" aria-hidden="true"><span class="app-divider"></span></li>
+                <li class="nav-item dropdown">
+                    <a class="nav-link app-user dropdown-toggle" href="#" data-bs-toggle="dropdown" aria-expanded="false">
+                        <span class="app-avatar" aria-hidden="true">AP</span>
+                        <span class="d-none d-sm-block">
+                            <span class="app-user__name d-block">Andi Pratama</span>
+                            <span class="app-user__role d-block">Orang tua</span>
+                        </span>
+                    </a>
+                    <div class="dropdown-menu dropdown-menu-end">
+                        <span class="dropdown-item-text text-body-secondary small">Orang tua</span>
+                        <form method="POST" action="#" data-mock-target="../index.html">
+                                                        <button type="submit" class="dropdown-item">Keluar</button>
+                        </form>
+                    </div>
+                </li>
+            </ul>
+        </div>
+    </nav>
+
+    <aside class="app-sidebar">
+        <div class="sidebar-brand">
+            <a href="dashboard.html" class="brand-link">
+                <img src="../_assets/cendikia-logos/svg/horizontal/cendikia-horizontal-color.svg" class="brand-image" alt="Cendikia">
+            </a>
+        </div>
+        <div class="sidebar-wrapper">
+                        <nav class="mt-2" aria-label="Navigasi utama">
+                <ul class="nav sidebar-menu flex-column" role="menu">
+                        <li class="nav-item">
+                <a href="dashboard.html" class="nav-link active" aria-current="page">
+                    <i class="nav-icon bi bi-speedometer2" aria-hidden="true"></i>
+                    <p>Dasbor</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="my/invoices.html" class="nav-link ">
+                    <i class="nav-icon bi bi-receipt" aria-hidden="true"></i>
+                    <p>Tagihan saya</p>
+                                    </a>
+            </li>
+                                <li class="nav-item">
+                <a href="inbox/announcements.html" class="nav-link ">
+                    <i class="nav-icon bi bi-megaphone" aria-hidden="true"></i>
+                    <p>Pengumuman</p>
+                                    </a>
+            </li>
+            </ul>
+            </nav>
+        </div>
+    </aside>
+
+    <main class="app-main">
+                <div class="app-content">
+            <div class="container-fluid">
+                                                                <div class="mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h2 class="h6 text-uppercase text-body-secondary mb-0">Pengumuman</h2>
+            <a href="inbox/announcements.html" class="small">Lihat semua</a>
+        </div>
+                    <div class="card mb-2">
+    <div class="card-body py-2">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <a href="inbox/announcements/1.html" class="fw-semibold text-decoration-none">Libur nasional pekan depan</a>
+            <small class="text-body-secondary text-nowrap">2026-10-07</small>
+        </div>
+        <p class="small text-body-secondary mb-0">Tidak ada kegiatan belajar pada hari libur nasional. Silakan hubungi admin untuk mengatur jadwal pengganti.</p>
+    </div>
+</div>
+            </div>
+
+    
+    <div class="mb-4">
+        <p class="greeting-date">Rabu, 7 Oktober 2026</p>
+        <h2 class="greeting">Selamat sore, Andi</h2>
+        <p class="page-header__desc">Masuk sebagai <strong>Andi Pratama</strong>.</p>
+    </div>
+
+    
+    <div class="row row-cols-1 row-cols-md-3 g-3 mb-4">
+        <div class="col"><div class="card h-100" data-metric="outstanding" data-value="350000">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Tunggakan</div>
+            <i class="bi bi-wallet2 kpi__icon" aria-hidden="true"></i>        </div>
+        <div class="kpi__value">
+            <a href="my/invoices.html" class="text-decoration-none">Rp 350.000</a>        </div>
+            </div>
+</div>
+</div>
+        <div class="col"><div class="card h-100" data-metric="overdue_count" data-value="0">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Tagihan lewat jatuh tempo</div>
+            <i class="bi bi-receipt kpi__icon" aria-hidden="true"></i>        </div>
+        <div class="kpi__value">
+            0        </div>
+            </div>
+</div>
+</div>
+        <div class="col">
+            <div class="card h-100" data-metric="next_due">
+                <div class="kpi">
+                    <div class="kpi__label">Jatuh tempo berikutnya</div>
+                    <div class="kpi__value">21 Okt 2026</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <h3 class="h6 mb-2">Anak saya</h3>
+    <div class="row g-3 mb-4">
+                    <div class="col-md-6 col-xl-4">
+                <div class="card h-100">
+                    <div class="card-body d-flex align-items-center gap-3">
+                        <span class="app-avatar app-avatar--lg" aria-hidden="true">DP</span>
+                        <div class="flex-grow-1 min-w-0">
+                            <div class="fw-semibold">Dina Pratama</div>
+                            <div class="text-body-secondary small">STU-002</div>
+                        </div>
+                                            </div>
+                </div>
+            </div>
+                    <div class="col-md-6 col-xl-4">
+                <div class="card h-100">
+                    <div class="card-body d-flex align-items-center gap-3">
+                        <span class="app-avatar app-avatar--lg" aria-hidden="true">RP</span>
+                        <div class="flex-grow-1 min-w-0">
+                            <div class="fw-semibold">Raka Pratama</div>
+                            <div class="text-body-secondary small">STU-001</div>
+                        </div>
+                                            </div>
+                </div>
+            </div>
+            </div>
+
+            <div class="card mb-4">
+            <div class="card-header">Pelajaran mendatang</div>
+                            <div class="lesson-row">
+                    <div class="lesson-row__when">
+                        <div class="fw-semibold">12 Okt 2026</div>
+                        <div class="text-body-secondary small">16:00-17:30</div>
+                    </div>
+                    <div class="flex-grow-1 min-w-0">
+                        <div class="fw-semibold">Raka Pratama <span class="fw-normal text-body-secondary">· Mathematics</span></div>
+                        <div class="text-body-secondary small">
+                            Siti Rahma · Offline, At home                                                    </div>
+                    </div>
+                                    </div>
+                    </div>
+            <div class="card mb-4">
+            <div class="card-header">Pelajaran terbaru</div>
+                            <div class="lesson-row">
+                    <div class="lesson-row__when">
+                        <div class="fw-semibold">05 Okt 2026</div>
+                        <div class="text-body-secondary small">16:00-17:30</div>
+                    </div>
+                    <div class="flex-grow-1 min-w-0">
+                        <div class="fw-semibold">Raka Pratama <span class="fw-normal text-body-secondary">· Mathematics</span></div>
+                        <div class="text-body-secondary small">
+                            Siti Rahma · Offline, At home                                                    </div>
+                    </div>
+                    <span class="badge text-bg-success">Selesai</span>
+                </div>
+                            <div class="lesson-row">
+                    <div class="lesson-row__when">
+                        <div class="fw-semibold">28 Sep 2026</div>
+                        <div class="text-body-secondary small">16:00-17:30</div>
+                    </div>
+                    <div class="flex-grow-1 min-w-0">
+                        <div class="fw-semibold">Raka Pratama <span class="fw-normal text-body-secondary">· Mathematics</span></div>
+                        <div class="text-body-secondary small">
+                            Siti Rahma · Offline, At home                                                    </div>
+                    </div>
+                    <span class="badge text-bg-success">Selesai</span>
+                </div>
+                    </div>
+    
+    <div class="row g-3 mb-4">
+        <div class="col-lg-7">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>Tagihan terbuka</span>
+                    <a href="my/invoices.html" class="btn btn-sm btn-primary">Tagihan saya</a>
+                </div>
+                <div class="table-responsive">
+                    <table class="table align-middle">
+                        <thead><tr><th>Tagihan</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th>Jatuh tempo</th></tr></thead>
+                        <tbody>
+                                                            <tr>
+                                    <td><a href="my/invoices/1.html">INV-202610-00001</a></td>
+                                    <td class="text-end">Rp 600.000</td>
+                                    <td class="text-end">Rp 350.000</td>
+                                    <td>21 Okt 2026 </td>
+                                </tr>
+                                                    </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-5">
+            <div class="card h-100">
+                <div class="card-header">Pembayaran terakhir</div>
+                <div class="table-responsive">
+                    <table class="table align-middle">
+                        <thead><tr><th>Dibayar pada</th><th>Tagihan</th><th>Metode</th><th class="text-end">Jumlah</th></tr></thead>
+                        <tbody>
+                                                            <tr>
+                                    <td>07 Okt 2026</td>
+                                    <td><a href="my/invoices/1.html">INV-202610-00001</a></td>
+                                    <td>Transfer</td>
+                                    <td class="text-end">Rp 250.000</td>
+                                </tr>
+                                                    </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="app-footer">
+        <strong>Cendikia</strong>
+    </footer>
+</div>
+<style>.mock-ribbon{position:fixed;left:12px;bottom:12px;z-index:99999;background:#111827;color:#fff;font:600 12px system-ui;padding:7px 12px;border-radius:999px;opacity:.85;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.3)}.mock-ribbon:hover{opacity:1;color:#fff}</style><a class="mock-ribbon" href="../index.html">Design preview &middot; switch role</a><script>
+document.addEventListener('submit',function(e){var f=e.target;if(f.tagName!=='FORM')return;e.preventDefault();e.stopImmediatePropagation();var t=f.getAttribute('data-mock-target');if(t)location.href=t;},true);
+</script></body>
+</html>

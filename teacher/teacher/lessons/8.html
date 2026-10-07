@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="id" data-bs-theme="light" data-lte-color-mode="off">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Pelajaran · Cendikia</title>
+    <link rel="preload" as="style" href="../../../_assets/build/assets/app-BTgYN4KC.css" /><link rel="modulepreload" as="script" href="../../../_assets/build/assets/app-DzuaMEJt.js" /><link rel="stylesheet" href="../../../_assets/build/assets/app-BTgYN4KC.css" /><script type="module" src="../../../_assets/build/assets/app-DzuaMEJt.js"></script><script id="browser-logger-active">
+(function() {
+    const ENDPOINT = 'http://127.0.0.1:8765/_boost/browser-logs';
+    const logQueue = [];
+    let flushTimeout = null;
+    const captureTypes = ["error","warning","info","log","debug","table"];
+
+    console.log('🔍 Browser logger active (MCP server detected). Posting to: ' + ENDPOINT);
+
+    // Store original console methods
+    const originalConsole = {
+        log: console.log,
+        debug: console.debug,
+        info: console.info,
+        error: console.error,
+        warn: console.warn,
+        table: console.table
+    };
+
+    // Walk own enumerable keys so JSON.stringify cannot auto-invoke a proxy fake toJSON (e.g. Livewire's `$wire`) and fire a real request.
+    function toSafeValue(value, seen) {
+        if (value === null || typeof value !== 'object') {
+            return value;
+        }
+        if (value instanceof Error) {
+            return { name: value.name, message: value.message, stack: value.stack };
+        }
+        // Date has no own enumerable keys, so the walk below would collapse it to {}.
+        if (value instanceof Date) {
+            return value.toISOString();
+        }
+        if (seen.has(value)) {
+            return '[Circular]';
+        }
+        seen.add(value);
+        if (Array.isArray(value)) {
+            return value.map((item) => toSafeValue(item, seen));
+        }
+        const plain = {};
+        for (const key of Object.keys(value)) {
+            if (key === 'toJSON') continue;
+            try {
+                plain[key] = toSafeValue(value[key], seen);
+            } catch (e) {
+                plain[key] = '[Unreadable]';
+            }
+        }
+        return plain;
+    }
+
+    // Helper to safely stringify values
+    function safeStringify(obj) {
+        return JSON.stringify(toSafeValue(obj, new WeakSet()));
+    }
+
+    // Normalize log type for consistency (e.g., 'warn' to 'warning')
+    function normalizeType(type) {
+        return type === 'warn' ? 'warning' : type;
+    }
+
+    // Determine if a log type should be captured based on configured levels
+    function shouldCapture(type) {
+        return captureTypes.includes(normalizeType(type));
+    }
+
+    // Batch and send logs
+    function flushLogs() {
+        if (logQueue.length === 0) return;
+
+        const batch = logQueue.splice(0, logQueue.length);
+
+        fetch(ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: JSON.stringify({ logs: batch })
+        }).catch(err => {
+            // Silently fail to avoid infinite loops
+            originalConsole.error('Failed to send logs:', err);
+        });
+    }
+
+    // Debounced flush (100ms)
+    function scheduleFlush() {
+        if (flushTimeout) clearTimeout(flushTimeout);
+        flushTimeout = setTimeout(flushLogs, 100);
+    }
+
+    // Intercept console methods
+    ['log', 'debug', 'info', 'error', 'warn', 'table'].forEach(method => {
+        console[method] = function(...args) {
+            // Call original method
+            originalConsole[method].apply(console, args);
+
+            // Capture log data
+            try {
+                if (!shouldCapture(method)) {
+                    return;
+                }
+
+                logQueue.push({
+                    type: method,
+                    timestamp: new Date().toISOString(),
+                    data: args.map(arg => {
+                        try {
+                            return typeof arg === 'object' ? JSON.parse(safeStringify(arg)) : arg;
+                        } catch (e) {
+                            return String(arg);
+                        }
+                    }),
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            } catch (e) {
+                // Fail silently
+            }
+        };
+    });
+
+    // Global error handlers for uncaught errors
+    const originalOnError = window.onerror;
+    window.onerror = function boostErrorHandler(errorMsg, url, lineNumber, colNumber, error) {
+        try {
+            if (shouldCapture('error')) {
+                logQueue.push({
+                    type: 'uncaught_error',
+                    timestamp: new Date().toISOString(),
+                    data: [{
+                        message: errorMsg,
+                        filename: url,
+                        lineno: lineNumber,
+                        colno: colNumber,
+                        error: error ? {
+                            name: error.name,
+                            message: error.message,
+                            stack: error.stack
+                        } : null
+                    }],
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            }
+
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Call original handler if it exists
+        if (originalOnError && typeof originalOnError === 'function') {
+            return originalOnError(errorMsg, url, lineNumber, colNumber, error);
+        }
+
+        // Let the error continue to propagate
+        return false;
+    }
+    window.addEventListener('error', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'window_error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: event.message,
+                    filename: event.filename,
+                    lineno: event.lineno,
+                    colno: event.colno,
+                    error: event.error ? {
+                        name: event.error.name,
+                        message: event.error.message,
+                        stack: event.error.stack
+                    } : null
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the error continue to propagate
+        return false;
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: 'Unhandled Promise Rejection',
+                    reason: toSafeValue(event.reason, new WeakSet())
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the rejection continue to propagate
+        return false;
+    });
+
+    // Flush on page unload
+    window.addEventListener('beforeunload', () => {
+        if (logQueue.length > 0) {
+            navigator.sendBeacon(ENDPOINT, JSON.stringify({ logs: logQueue }));
+        }
+    });
+})();
+</script>
+</head>
+<body class="teacher-shell">
+<header class="teacher-top">
+    <div class="teacher-top__bar">
+                    <a href="../../dashboard.html" class="teacher-top__back" aria-label="Kembali"><i class="bi bi-arrow-left" aria-hidden="true"></i></a>
+                <div class="d-flex align-items-center gap-2 ms-auto">
+            <a href="../../notifications.html" class="nav-link position-relative nav-link teacher-top__icon position-relative" aria-label="Notifications, 3 unread">
+    <i class="bi bi-bell"></i>
+    <span class="badge rounded-pill text-bg-danger position-absolute top-0 start-100 translate-middle "
+          data-notification-count>3</span>
+</a>
+            <div class="dropdown">
+                <button type="button" class="teacher-top__avatar" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Siti Rahma">SR</button>
+                <div class="dropdown-menu dropdown-menu-end">
+                    <span class="dropdown-item-text fw-semibold">Siti Rahma</span>
+                    <form method="POST" action="#" data-mock-target="../../../index.html">
+                                                <button type="submit" class="dropdown-item">Keluar</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+            <h1 class="teacher-top__title">Selesaikan pelajaran</h1>
+    </header>
+
+<main style="max-width: 640px;">
+            <div class="summary-card mb-3">
+        <h2 class="summary-card__title">Raka Pratama</h2>
+        <p class="summary-card__subject">Mathematics</p>
+        <div class="summary-card__meta summary-card__group">
+            <span><i class="bi bi-calendar-event" aria-hidden="true"></i>Selasa 6 Oktober 2026</span>
+            <span><i class="bi bi-clock" aria-hidden="true"></i>16:00-17:30 (WIB)</span>
+            <span><i class="bi bi-house" aria-hidden="true"></i>Tatap muka · Rumah siswa</span>
+                    </div>
+                        <div class="summary-card__group">
+            <span class="badge text-bg-info">Terjadwal</span>
+            <span class="badge text-bg-warning">Laporan diperlukan</span>        </div>
+    </div>
+
+    
+            <form method="POST" class="mb-3" data-report-form data-scheduled-end="17:30" action="#" data-mock-target="8.html">
+                        <h3 class="report-title">Laporkan pelajaran ini</h3>
+            <p class="report-lead">Kolom bertanda * wajib diisi.</p>
+
+            <section class="report-step" aria-labelledby="step-time">
+                <h4 class="report-step__title" id="step-time"><span class="report-step__num" aria-hidden="true">1</span>Waktu sebenarnya</h4>
+                <div class="row g-2">
+                    <div class="col-6">
+                        <label class="form-label" for="actual_start_time">Mulai pukul</label>
+                        <input type="time" id="actual_start_time" name="actual_start_time" value="16:00" class="form-control time-input " required>
+                                            </div>
+                    <div class="col-6">
+                        <label class="form-label" for="actual_end_time">Selesai pukul</label>
+                        <input type="time" id="actual_end_time" name="actual_end_time" value="17:30" class="form-control time-input " required>
+                                            </div>
+                </div>
+                <div class="report-duration" aria-live="polite" data-duration-box hidden
+                     data-overtime-label="Lembur" data-unit="mnt" data-hour="j" data-order-error="Jam selesai harus setelah jam mulai.">
+                    <span data-duration-text></span>
+                    <span class="report-duration__over" data-overtime-hint></span>
+                </div>
+            </section>
+
+            <section class="report-step" aria-labelledby="step-student">
+                <h4 class="report-step__title" id="step-student"><span class="report-step__num" aria-hidden="true">2</span>Kondisi siswa</h4>
+                <div class="condition-picker" role="radiogroup" aria-labelledby="step-student">
+                                            <input class="btn-check" type="radio" name="student_condition" id="condition-focused" value="focused" checked>
+                        <label class="btn flex-column condition-focused" for="condition-focused"><i class="bi bi-emoji-smile" aria-hidden="true"></i><span>Fokus</span></label>
+                                            <input class="btn-check" type="radio" name="student_condition" id="condition-moderate" value="moderate" >
+                        <label class="btn flex-column condition-moderate" for="condition-moderate"><i class="bi bi-emoji-neutral" aria-hidden="true"></i><span>Sedang</span></label>
+                                            <input class="btn-check" type="radio" name="student_condition" id="condition-not_focused" value="not_focused" >
+                        <label class="btn flex-column condition-not_focused" for="condition-not_focused"><i class="bi bi-emoji-frown" aria-hidden="true"></i><span>Kurang fokus</span></label>
+                                    </div>
+                            </section>
+
+            <section class="report-step" aria-labelledby="step-notes">
+                <h4 class="report-step__title" id="step-notes"><span class="report-step__num" aria-hidden="true">3</span>Ringkasan pelajaran</h4>
+
+                <div class="mb-3">
+                    <label class="form-label" for="material">Materi yang dibahas <span class="text-danger" aria-hidden="true">*</span></label>
+                    <textarea id="material" name="material" rows="3" class="form-control " required maxlength="2000" data-counter placeholder="mis. Pecahan: penjumlahan penyebut berbeda, 6 soal latihan" aria-describedby="material-help"></textarea>
+                    <div class="field-meta"><span class="form-text" id="material-help">Apa yang Anda ajarkan hari ini</span><span class="field-count" data-count-for="material"></span></div>
+                                    </div>
+                <div class="mb-3">
+                    <label class="form-label" for="evaluation">Evaluasi <span class="text-danger" aria-hidden="true">*</span></label>
+                    <textarea id="evaluation" name="evaluation" rows="3" class="form-control " required maxlength="2000" data-counter placeholder="Seberapa paham siswa terhadap materi ini?" aria-describedby="evaluation-help"></textarea>
+                    <div class="field-meta"><span class="form-text" id="evaluation-help">Ditinjau oleh admin</span><span class="field-count" data-count-for="evaluation"></span></div>
+                                    </div>
+
+                <details class="report-optional" >
+                    <summary><i class="bi bi-plus-circle" aria-hidden="true"></i>Tambah kesulitan atau catatan (opsional)</summary>
+                    <div class="mt-3 mb-3">
+                        <label class="form-label" for="difficulties">Kesulitan</label>
+                        <textarea id="difficulties" name="difficulties" rows="2" class="form-control " maxlength="2000" data-counter></textarea>
+                        <div class="field-meta"><span></span><span class="field-count" data-count-for="difficulties"></span></div>
+                                            </div>
+                    <div class="mb-0">
+                        <label class="form-label" for="notes">Catatan</label>
+                        <textarea id="notes" name="notes" rows="2" class="form-control " maxlength="1000" data-counter></textarea>
+                        <div class="field-meta"><span></span><span class="field-count" data-count-for="notes"></span></div>
+                                            </div>
+                </details>
+            </section>
+
+            <div class="report-submit">
+                <button type="submit" class="btn btn-primary w-100" data-submit data-busy="Mengirim…"><i class="bi bi-send" aria-hidden="true"></i> Kirim laporan</button>
+            </div>
+            <p class="text-body-secondary text-center mt-2 mb-0" style="font-size: .875rem; line-height: 1.25rem;">Setelah dikirim, laporan hanya bisa diubah jika admin mengembalikannya.</p>
+        </form>
+    
+    
+            <script>
+            (function () {
+                var form = document.querySelector('[data-report-form]');
+                if (!form) return;
+                var box = form.querySelector('[data-duration-box]');
+                var text = form.querySelector('[data-duration-text]');
+                var hint = form.querySelector('[data-overtime-hint]');
+                var start = form.querySelector('#actual_start_time');
+                var end = form.querySelector('#actual_end_time');
+                var scheduledEnd = form.getAttribute('data-scheduled-end');
+                function toMinutes(v) { var p = (v || '').split(':'); return p.length === 2 ? parseInt(p[0], 10) * 60 + parseInt(p[1], 10) : null; }
+                function fmt(m) {
+                    var h = Math.floor(m / 60), r = m % 60, unit = box.getAttribute('data-unit');
+                    return (h ? h + box.getAttribute('data-hour') + ' ' : '') + (r || !h ? r + ' ' + unit : '').trim();
+                }
+                function update() {
+                    var s = toMinutes(start.value), e = toMinutes(end.value), planned = toMinutes(scheduledEnd);
+                    box.hidden = s === null || e === null;
+                    if (box.hidden) return;
+                    var bad = e <= s;
+                    box.classList.toggle('is-error', bad);
+                    text.textContent = bad ? box.getAttribute('data-order-error') : fmt(e - s);
+                    var over = !bad && planned !== null ? e - planned : 0;
+                    hint.textContent = over > 0 ? box.getAttribute('data-overtime-label') + ': +' + over + ' ' + box.getAttribute('data-unit') : '';
+                }
+                start.addEventListener('input', update);
+                end.addEventListener('input', update);
+                update();
+
+                form.querySelectorAll('[data-counter]').forEach(function (field) {
+                    var out = form.querySelector('[data-count-for="' + field.id + '"]');
+                    var max = field.getAttribute('maxlength');
+                    function count() { out.textContent = field.value.length + ' / ' + max; out.classList.toggle('is-near', field.value.length > max * 0.9); }
+                    field.addEventListener('input', count);
+                    count();
+                });
+
+                form.addEventListener('submit', function () {
+                    var btn = form.querySelector('[data-submit]');
+                    if (!btn || !form.checkValidity()) return;
+                    btn.disabled = true;
+                    btn.textContent = btn.getAttribute('data-busy');
+                });
+            })();
+        </script>
+</main>
+
+<nav class="teacher-tabbar" aria-label="Navigasi utama">
+            <a href="../../dashboard.html"  aria-current="page" >
+            <i class="bi bi-calendar-check" aria-hidden="true"></i>
+            <span>Hari ini</span>
+        </a>
+            <a href="../proposals.html" >
+            <i class="bi bi-inbox" aria-hidden="true"></i>
+            <span>Permintaan</span>
+        </a>
+            <a href="../earnings.html" >
+            <i class="bi bi-wallet2" aria-hidden="true"></i>
+            <span>Penghasilan</span>
+        </a>
+            <a href="../../inbox/announcements.html" >
+            <i class="bi bi-megaphone" aria-hidden="true"></i>
+            <span>Pengumuman</span>
+        </a>
+    </nav>
+<style>.mock-ribbon{position:fixed;left:12px;bottom:12px;z-index:99999;background:#111827;color:#fff;font:600 12px system-ui;padding:7px 12px;border-radius:999px;opacity:.85;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.3)}.mock-ribbon:hover{opacity:1;color:#fff}</style><a class="mock-ribbon" href="../../../index.html">Design preview &middot; switch role</a><script>
+document.addEventListener('submit',function(e){var f=e.target;if(f.tagName!=='FORM')return;e.preventDefault();e.stopImmediatePropagation();var t=f.getAttribute('data-mock-target');if(t)location.href=t;},true);
+</script></body>
+</html>

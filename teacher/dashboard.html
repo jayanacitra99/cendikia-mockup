@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="id" data-bs-theme="light" data-lte-color-mode="off">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Dasbor guru · Cendikia</title>
+    <link rel="preload" as="style" href="../_assets/build/assets/app-BTgYN4KC.css" /><link rel="modulepreload" as="script" href="../_assets/build/assets/app-DzuaMEJt.js" /><link rel="stylesheet" href="../_assets/build/assets/app-BTgYN4KC.css" /><script type="module" src="../_assets/build/assets/app-DzuaMEJt.js"></script><script id="browser-logger-active">
+(function() {
+    const ENDPOINT = 'http://127.0.0.1:8765/_boost/browser-logs';
+    const logQueue = [];
+    let flushTimeout = null;
+    const captureTypes = ["error","warning","info","log","debug","table"];
+
+    console.log('🔍 Browser logger active (MCP server detected). Posting to: ' + ENDPOINT);
+
+    // Store original console methods
+    const originalConsole = {
+        log: console.log,
+        debug: console.debug,
+        info: console.info,
+        error: console.error,
+        warn: console.warn,
+        table: console.table
+    };
+
+    // Walk own enumerable keys so JSON.stringify cannot auto-invoke a proxy fake toJSON (e.g. Livewire's `$wire`) and fire a real request.
+    function toSafeValue(value, seen) {
+        if (value === null || typeof value !== 'object') {
+            return value;
+        }
+        if (value instanceof Error) {
+            return { name: value.name, message: value.message, stack: value.stack };
+        }
+        // Date has no own enumerable keys, so the walk below would collapse it to {}.
+        if (value instanceof Date) {
+            return value.toISOString();
+        }
+        if (seen.has(value)) {
+            return '[Circular]';
+        }
+        seen.add(value);
+        if (Array.isArray(value)) {
+            return value.map((item) => toSafeValue(item, seen));
+        }
+        const plain = {};
+        for (const key of Object.keys(value)) {
+            if (key === 'toJSON') continue;
+            try {
+                plain[key] = toSafeValue(value[key], seen);
+            } catch (e) {
+                plain[key] = '[Unreadable]';
+            }
+        }
+        return plain;
+    }
+
+    // Helper to safely stringify values
+    function safeStringify(obj) {
+        return JSON.stringify(toSafeValue(obj, new WeakSet()));
+    }
+
+    // Normalize log type for consistency (e.g., 'warn' to 'warning')
+    function normalizeType(type) {
+        return type === 'warn' ? 'warning' : type;
+    }
+
+    // Determine if a log type should be captured based on configured levels
+    function shouldCapture(type) {
+        return captureTypes.includes(normalizeType(type));
+    }
+
+    // Batch and send logs
+    function flushLogs() {
+        if (logQueue.length === 0) return;
+
+        const batch = logQueue.splice(0, logQueue.length);
+
+        fetch(ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: JSON.stringify({ logs: batch })
+        }).catch(err => {
+            // Silently fail to avoid infinite loops
+            originalConsole.error('Failed to send logs:', err);
+        });
+    }
+
+    // Debounced flush (100ms)
+    function scheduleFlush() {
+        if (flushTimeout) clearTimeout(flushTimeout);
+        flushTimeout = setTimeout(flushLogs, 100);
+    }
+
+    // Intercept console methods
+    ['log', 'debug', 'info', 'error', 'warn', 'table'].forEach(method => {
+        console[method] = function(...args) {
+            // Call original method
+            originalConsole[method].apply(console, args);
+
+            // Capture log data
+            try {
+                if (!shouldCapture(method)) {
+                    return;
+                }
+
+                logQueue.push({
+                    type: method,
+                    timestamp: new Date().toISOString(),
+                    data: args.map(arg => {
+                        try {
+                            return typeof arg === 'object' ? JSON.parse(safeStringify(arg)) : arg;
+                        } catch (e) {
+                            return String(arg);
+                        }
+                    }),
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            } catch (e) {
+                // Fail silently
+            }
+        };
+    });
+
+    // Global error handlers for uncaught errors
+    const originalOnError = window.onerror;
+    window.onerror = function boostErrorHandler(errorMsg, url, lineNumber, colNumber, error) {
+        try {
+            if (shouldCapture('error')) {
+                logQueue.push({
+                    type: 'uncaught_error',
+                    timestamp: new Date().toISOString(),
+                    data: [{
+                        message: errorMsg,
+                        filename: url,
+                        lineno: lineNumber,
+                        colno: colNumber,
+                        error: error ? {
+                            name: error.name,
+                            message: error.message,
+                            stack: error.stack
+                        } : null
+                    }],
+                    url: window.location.href,
+                    userAgent: navigator.userAgent
+                });
+
+                scheduleFlush();
+            }
+
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Call original handler if it exists
+        if (originalOnError && typeof originalOnError === 'function') {
+            return originalOnError(errorMsg, url, lineNumber, colNumber, error);
+        }
+
+        // Let the error continue to propagate
+        return false;
+    }
+    window.addEventListener('error', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'window_error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: event.message,
+                    filename: event.filename,
+                    lineno: event.lineno,
+                    colno: event.colno,
+                    error: event.error ? {
+                        name: event.error.name,
+                        message: event.error.message,
+                        stack: event.error.stack
+                    } : null
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the error continue to propagate
+        return false;
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+        try {
+            if (!shouldCapture('error')) {
+                return false;
+            }
+
+            logQueue.push({
+                type: 'error',
+                timestamp: new Date().toISOString(),
+                data: [{
+                    message: 'Unhandled Promise Rejection',
+                    reason: toSafeValue(event.reason, new WeakSet())
+                }],
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            });
+
+            scheduleFlush();
+        } catch (e) {
+            // Fail silently
+        }
+
+        // Let the rejection continue to propagate
+        return false;
+    });
+
+    // Flush on page unload
+    window.addEventListener('beforeunload', () => {
+        if (logQueue.length > 0) {
+            navigator.sendBeacon(ENDPOINT, JSON.stringify({ logs: logQueue }));
+        }
+    });
+})();
+</script>
+</head>
+<body class="teacher-shell">
+<header class="teacher-top">
+    <div class="teacher-top__bar">
+                    <img src="../_assets/cendikia-logos/svg/horizontal/cendikia-horizontal-white.svg" alt="Cendikia" class="teacher-top__logo">
+                <div class="d-flex align-items-center gap-2 ms-auto">
+            <a href="notifications.html" class="nav-link position-relative nav-link teacher-top__icon position-relative" aria-label="Notifications, 3 unread">
+    <i class="bi bi-bell"></i>
+    <span class="badge rounded-pill text-bg-danger position-absolute top-0 start-100 translate-middle "
+          data-notification-count>3</span>
+</a>
+            <div class="dropdown">
+                <button type="button" class="teacher-top__avatar" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Siti Rahma">SR</button>
+                <div class="dropdown-menu dropdown-menu-end">
+                    <span class="dropdown-item-text fw-semibold">Siti Rahma</span>
+                    <form method="POST" action="#" data-mock-target="../index.html">
+                                                <button type="submit" class="dropdown-item">Keluar</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+            <p class="teacher-top__date">Rabu, 7 Oktober 2026</p>
+        <h1 class="greeting">Selamat sore, Siti</h1>
+        <div class="teacher-top__chips"><span class="teacher-chip">1 sesi hari ini</span>
+                            <span class="teacher-chip teacher-chip--warning">1 laporan tertunda</span></div>    </header>
+
+<main style="max-width: 640px;">
+            <p class="text-body-secondary small mb-3">Masuk sebagai <strong>Siti Rahma</strong>.</p>
+
+        
+                    <div class="mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h2 class="teacher-section text-uppercase text-body-secondary">Pengumuman</h2>
+                    <a href="inbox/announcements.html" class="small">Lihat semua</a>
+                </div>
+                                    <div class="card mb-2">
+    <div class="card-body py-2">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <a href="inbox/announcements/1.html" class="fw-semibold text-decoration-none">Libur nasional pekan depan</a>
+            <small class="text-body-secondary text-nowrap">2026-10-07</small>
+        </div>
+        <p class="small text-body-secondary mb-0">Tidak ada kegiatan belajar pada hari libur nasional. Silakan hubungi admin untuk mengatur jadwal pengganti.</p>
+    </div>
+</div>
+                            </div>
+        
+        <h2 class="teacher-section text-uppercase text-body-secondary">Hari ini</h2>
+                    <a href="teacher/lessons/7.html" class="lesson-card lesson-card--row mb-2 text-decoration-none is-muted">
+        <div class="d-flex justify-content-between">
+            <strong>13:00-14:30</strong>
+            <span class="text-body-secondary small">Rab 7 Okt</span>
+        </div>
+        <div class="text-body">Raka Pratama <span class="text-body-secondary">· Mathematics</span></div>
+        <div>
+            <span class="badge text-bg-success">Selesai</span>
+            <span class="badge text-bg-info">Dikirim</span>
+                        <span class="badge badge-flag"><i class="bi bi-house" aria-hidden="true"></i> Tatap muka</span>
+        </div>
+    </a>
+        
+                    <h2 class="teacher-section text-uppercase text-body-secondary mt-4">Perlu laporan</h2>
+                            <div class="lesson-card lesson-card--due mb-2">
+        <a href="teacher/lessons/8.html" class="lesson-card__body text-decoration-none">
+            <div class="d-flex justify-content-between">
+                <strong>16:00-17:30</strong>
+                <span class="text-body-secondary small">Sel 6 Okt</span>
+            </div>
+            <div class="text-body">Raka Pratama <span class="text-body-secondary">· Mathematics</span></div>
+            <div class="mt-1">
+                <span class="badge text-bg-info">Terjadwal</span>
+                                <span class="badge text-bg-warning">Laporkan sekarang</span>
+                <span class="badge badge-flag"><i class="bi bi-house" aria-hidden="true"></i> Tatap muka</span>
+            </div>
+        </a>
+        <a href="teacher/lessons/8.html" class="btn btn-primary btn-complete w-100">Selesaikan pelajaran</a>
+    </div>
+                    
+        
+                    <h2 class="teacher-section text-uppercase text-body-secondary mt-4">Angka saya</h2>
+            <nav class="seg mb-3" aria-label="Periode">
+                                                        <a href="dashboard.html" data-period="today"
+                       class=""
+                       >Hari ini</a>
+                                                        <a href="dashboard.html" data-period="week"
+                       class=""
+                       >Minggu ini</a>
+                                                        <a href="dashboard.html" data-period="month"
+                       class="active"
+                        aria-current="page" >Bulan ini</a>
+                                                        <a href="dashboard.html" data-period="last_month"
+                       class=""
+                       >Bulan lalu</a>
+                            </nav>
+
+            <div class="row row-cols-2 g-2 mb-2">
+                <div class="col"><div class="card h-100" data-metric="lessons_taught" data-value="2">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Pelajaran diajarkan</div>
+                    </div>
+        <div class="kpi__value">
+            2        </div>
+            </div>
+</div>
+</div>
+                <div class="col"><div class="card h-100" data-metric="overtime_minutes" data-value="0">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Menit lembur</div>
+                    </div>
+        <div class="kpi__value">
+            0        </div>
+            </div>
+</div>
+</div>
+                <div class="col"><div class="card h-100" data-metric="reports_awaiting" data-value="6">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Laporan menunggu tinjauan</div>
+                    </div>
+        <div class="kpi__value">
+            6        </div>
+            </div>
+</div>
+</div>
+                <div class="col"><div class="card h-100" data-metric="reports_rejected" data-value="0">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Laporan dikembalikan</div>
+                    </div>
+        <div class="kpi__value">
+            0        </div>
+            </div>
+</div>
+</div>
+                <div class="col"><div class="card h-100" data-metric="earnings_approved_unpaid" data-value="0">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Disetujui, menunggu pembayaran</div>
+                    </div>
+        <div class="kpi__value">
+            <a href="teacher/earnings.html" class="text-decoration-none">Rp 0</a>        </div>
+            </div>
+</div>
+</div>
+                <div class="col"><div class="card h-100" data-metric="earnings_paid" data-value="240000">
+    <div class="kpi ">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="kpi__label">Dibayar dalam periode</div>
+                    </div>
+        <div class="kpi__value">
+            <a href="teacher/earnings.html" class="text-decoration-none">Rp 240.000</a>        </div>
+            </div>
+</div>
+</div>
+            </div>
+            <p class="text-body-secondary small mb-3">Laporan menunggu dan dikembalikan menunjukkan kondisi saat ini.</p>
+        
+        <p class="mb-3"><a href="teacher/earnings.html" class="small">Penghasilan saya</a></p>
+
+                    <h2 class="teacher-section text-uppercase text-body-secondary mt-4">Akan datang</h2>
+                            <a href="teacher/lessons/7.html" class="lesson-card lesson-card--row mb-2 text-decoration-none ">
+        <div class="d-flex justify-content-between">
+            <strong>16:00-17:30</strong>
+            <span class="text-body-secondary small">Sen 12 Okt</span>
+        </div>
+        <div class="text-body">Raka Pratama <span class="text-body-secondary">· Mathematics</span></div>
+        <div>
+            <span class="badge text-bg-info">Terjadwal</span>
+                                    <span class="badge badge-flag"><i class="bi bi-house" aria-hidden="true"></i> Tatap muka</span>
+        </div>
+    </a>
+</main>
+
+<nav class="teacher-tabbar" aria-label="Navigasi utama">
+            <a href="dashboard.html"  aria-current="page" >
+            <i class="bi bi-calendar-check" aria-hidden="true"></i>
+            <span>Hari ini</span>
+        </a>
+            <a href="teacher/proposals.html" >
+            <i class="bi bi-inbox" aria-hidden="true"></i>
+            <span>Permintaan</span>
+        </a>
+            <a href="teacher/earnings.html" >
+            <i class="bi bi-wallet2" aria-hidden="true"></i>
+            <span>Penghasilan</span>
+        </a>
+            <a href="inbox/announcements.html" >
+            <i class="bi bi-megaphone" aria-hidden="true"></i>
+            <span>Pengumuman</span>
+        </a>
+    </nav>
+<style>.mock-ribbon{position:fixed;left:12px;bottom:12px;z-index:99999;background:#111827;color:#fff;font:600 12px system-ui;padding:7px 12px;border-radius:999px;opacity:.85;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.3)}.mock-ribbon:hover{opacity:1;color:#fff}</style><a class="mock-ribbon" href="../index.html">Design preview &middot; switch role</a><script>
+document.addEventListener('submit',function(e){var f=e.target;if(f.tagName!=='FORM')return;e.preventDefault();e.stopImmediatePropagation();var t=f.getAttribute('data-mock-target');if(t)location.href=t;},true);
+</script></body>
+</html>
